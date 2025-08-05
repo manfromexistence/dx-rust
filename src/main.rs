@@ -21,9 +21,21 @@ use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-fn is_generated_like_id(id: &str, expected_id_chars: &HashSet<char>) -> bool {
-    let id_chars: HashSet<char> = id.chars().filter(|c| !c.is_digit(10)).collect();
-    id_chars.is_subset(expected_id_chars) && id_chars.len() == expected_id_chars.len()
+fn is_managed_id(id: &str) -> bool {
+    let base_id: String = id.chars().filter(|c| c.is_alphabetic()).collect();
+    if base_id.is_empty() {
+        return false;
+    }
+    if base_id.chars().any(|c| !c.is_lowercase()) {
+        return false;
+    }
+    let mut chars: Vec<char> = base_id.chars().collect();
+    let original_len = chars.len();
+    chars.sort_unstable();
+    chars.dedup();
+    let sorted_unique_base_id: String = chars.into_iter().collect();
+    
+    base_id == sorted_unique_base_id && base_id.len() == original_len
 }
 
 #[derive(Debug, Clone)]
@@ -144,10 +156,9 @@ fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, Hash
         id_chars.sort_unstable();
         id_chars.dedup();
         let expected_id: String = id_chars.into_iter().collect();
-        let expected_id_chars: HashSet<char> = expected_id.chars().collect();
 
         let should_manage_id = match &el.current_id {
-            Some(id) => is_generated_like_id(id, &expected_id_chars),
+            Some(id) => is_managed_id(id),
             None => true,
         };
 
@@ -164,7 +175,9 @@ fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, Hash
         if count > 1 {
             for (i, el) in elements.iter().enumerate() {
                 let unique_id = format!("{}{}", base_id, i + 1);
-                id_updates.insert(el.span, unique_id.clone());
+                if el.current_id.as_deref() != Some(&unique_id) {
+                    id_updates.insert(el.span, unique_id.clone());
+                }
                 final_ids.insert(unique_id);
             }
         } else if let Some(el) = elements.first() {
