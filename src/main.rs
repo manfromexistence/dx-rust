@@ -2,6 +2,7 @@ use colored::*;
 use glob::glob;
 use memmap2::Mmap;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use rayon::prelude::*; // Import the Rayon prelude for parallel iterators
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -163,13 +164,15 @@ fn write_file(path: &Path, content: &str) {
 fn calculate_global_classnames_and_ids(
     file_map: &HashMap<PathBuf, (HashSet<String>, HashSet<String>)>,
 ) -> (HashSet<String>, HashSet<String>) {
+    // FIX: Use .par_iter() which is the correct method for parallel iteration on a HashMap.
     let classnames = file_map
-        .values()
-        .flat_map(|(classes, _)| classes.clone())
+        .par_iter()
+        .flat_map(|(_, (classes, _))| classes.clone())
         .collect();
+    // FIX: Use .par_iter() here as well.
     let ids = file_map
-        .values()
-        .flat_map(|(_, ids)| ids.clone())
+        .par_iter()
+        .flat_map(|(_, (_, ids))| ids.clone())
         .collect();
     (classnames, ids)
 }
@@ -191,7 +194,6 @@ fn write_css(classnames: &HashSet<String>, ids: &HashSet<String>, output_path: &
     }
 }
 
-// FIX: Use floating point division for more precise millisecond timing.
 fn format_duration(duration: Duration) -> String {
     let micros = duration.as_micros();
     if micros < 1000 {
@@ -213,16 +215,15 @@ fn initial_scan() -> (
     let start = Instant::now();
     let cm: Arc<SourceMap> = Default::default();
 
-    // FIX: Convert glob paths to absolute paths to match watcher event paths.
     let current_dir = env::current_dir().expect("Failed to get current directory");
     let paths: Vec<_> = glob("./src/**/*.tsx")
         .expect("Failed to read glob pattern")
         .filter_map(Result::ok)
-        .map(|path| current_dir.join(path))
+        .map(|path| path.canonicalize().unwrap_or_else(|_| current_dir.join(path)))
         .collect();
 
     let file_map: HashMap<PathBuf, (HashSet<String>, HashSet<String>)> = paths
-        .iter()
+        .par_iter()
         .filter_map(|path| {
             let (classnames, ids, modified_code, original_code) =
                 parse_and_modify_file(path, &cm)?;
@@ -232,25 +233,18 @@ fn initial_scan() -> (
             Some((path.clone(), (classnames, ids)))
         })
         .collect();
+        
     let (global_classnames, global_ids) = calculate_global_classnames_and_ids(&file_map);
     let output_path = PathBuf::from("./styles.css");
     write_css(&global_classnames, &global_ids, &output_path);
-    let output_path_str = output_path
-        .canonicalize()
-        .unwrap_or(output_path)
-        .to_string_lossy()
-        .to_string();
+
     let duration = start.elapsed();
     println!(
-        "{} initial build (+{},{}) -> {} (+{},{}) \u{2022} {}",
+        "{} Initial scan found {} classes and {} IDs in {} files \u{2022} {}",
         "✓".bright_green(),
         global_classnames.len().to_string().bright_green(),
-        "0".bright_red(),
-        output_path_str.bright_yellow(),
-        (global_classnames.len() + global_ids.len())
-            .to_string()
-            .bright_green(),
-        "0".bright_red(),
+        global_ids.len().to_string().bright_green(),
+        paths.len().to_string().bright_yellow(),
         format_duration(duration).bright_cyan()
     );
     (file_map, global_classnames, global_ids)
@@ -265,7 +259,6 @@ fn process_change(
     let start = Instant::now();
     let cm: Arc<SourceMap> = Default::default();
     
-    // FIX: Now that paths are consistent, this correctly gets the old state for the file.
     let (old_file_classnames, _) = file_map.get(path).cloned().unwrap_or_default();
 
     let (new_file_classnames, new_file_ids, modified_code, original_code) = if path.exists() {
@@ -300,11 +293,7 @@ fn process_change(
     let source_added = new_file_classnames.difference(&old_file_classnames).count();
     let source_removed = old_file_classnames.difference(&new_file_classnames).count();
 
-    let path_str = path
-        .canonicalize()
-        .unwrap_or(path.to_path_buf())
-        .to_string_lossy()
-        .to_string();
+    let path_str = path.to_string_lossy().to_string();
     let display_name = path_str.bright_blue();
 
     let output_added = new_global_classnames.difference(old_global_classnames).count() + new_global_ids.difference(old_global_ids).count();
@@ -343,9 +332,12 @@ fn main() {
         Config::default().with_poll_interval(Duration::from_millis(200)),
     )
     .expect("Failed to create file watcher");
+
+    let watch_path = env::current_dir().unwrap().join("src");
     watcher
-        .watch(Path::new("./src"), RecursiveMode::Recursive)
+        .watch(&watch_path, RecursiveMode::Recursive)
         .expect("Failed to watch ./src directory");
+        
     println!(
         "{}",
         "👀 Watching for file changes in ./src...".bold().bright_purple()
@@ -362,7 +354,8 @@ fn main() {
             ) {
                 for path in event.paths {
                     if path.extension().and_then(|s| s.to_str()) == Some("tsx") {
-                        debounce_map.insert(path, Instant::now());
+                        let canonical_path = path.canonicalize().unwrap_or(path);
+                        debounce_map.insert(canonical_path, Instant::now());
                     }
                 }
             }
