@@ -6,13 +6,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use swc_common::{FileName, SourceMap};
 use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, JSXAttr, IdentName, Str};
-use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsConfig};
-use swc_ecma_visit::{FoldWith, VisitMutWith, VisitMut};
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 use swc_ecma_codegen::{Emitter, text_writer::JsWriter};
 
 struct ClassNameCollector<'a> {
@@ -87,16 +87,16 @@ impl VisitMut for IdAdder {
     }
 }
 
-fn parse_and_modify_file(path: &Path, cm: &Rc<SourceMap>) -> Option<(HashSet<String>, String)> {
+fn parse_and_modify_file(path: &Path, cm: &Arc<SourceMap>) -> Option<(HashSet<String>, String)> {
     let file = File::open(path).ok()?;
     let mmap = unsafe { Mmap::map(&file).ok()? };
     let source = String::from_utf8_lossy(&mmap).to_string();
     let fm = cm.new_source_file(
-        FileName::Real(path.to_path_buf()),
+        Arc::new(FileName::Real(path.to_path_buf())),
         source.clone(),
     );
     let lexer = Lexer::new(
-        Syntax::Typescript(TsConfig {
+        Syntax::Typescript(TsSyntax {
             tsx: true,
             ..Default::default()
         }),
@@ -161,7 +161,7 @@ fn format_duration(duration: Duration) -> String {
 fn initial_scan() -> (HashMap<PathBuf, HashSet<String>>, HashSet<String>) {
     println!("{}", "🚀 dx-styles starting initial scan...".bold().bright_purple());
     let start = Instant::now();
-    let cm: Rc<SourceMap> = Default::default();
+    let cm: Arc<SourceMap> = Default::default();
     let paths: Vec<_> = glob("./src/**/*.tsx")
         .expect("Failed to read glob pattern")
         .filter_map(Result::ok)
@@ -196,7 +196,7 @@ fn process_change(
     old_global_classnames: &HashSet<String>,
 ) -> Option<HashSet<String>> {
     let start = Instant::now();
-    let cm: Rc<SourceMap> = Default::default();
+    let cm: Arc<SourceMap> = Default::default();
     let old_file_classnames = file_map.get(path).cloned().unwrap_or_default();
 
     let (new_file_classnames, modified_code) = if path.exists() {
