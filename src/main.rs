@@ -1,9 +1,10 @@
+use colored::Colorize;
 use glob::glob;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use swc_common::{sync::Lrc, SourceMap};
@@ -49,25 +50,48 @@ fn parse_file(cm: &SourceMap, path: &Path) -> Result<Module, String> {
     parser.parse_module().map_err(|e| format!("{:?}", e))
 }
 
-fn process_all_files(changed_path: &Path, cm: &SourceMap) {
-    let start = Instant::now();
+fn process_file(cm: &SourceMap, path: &Path, cache: &mut HashMap<PathBuf, HashSet<String>>) -> HashSet<String> {
     let mut classnames = HashSet::new();
-    for entry in glob("./src/**/*.tsx").expect("Failed to read glob pattern") {
-        if let Ok(path) = entry {
-            if let Ok(module) = parse_file(cm, &path) {
-                let mut collector = ClassNameCollector {
-                    classnames: &mut classnames,
-                };
-                module.visit_with(&mut collector);
-            }
-        }
+    if let Ok(module) = parse_file(cm, path) {
+        let mut collector = ClassNameCollector {
+            classnames: &mut classnames,
+        };
+        module.visit_with(&mut collector);
     }
-    write_css(&classnames);
-    let duration = start.elapsed().as_millis();
+    cache.insert(path.to_path_buf(), classnames.clone());
+    classnames
+}
+
+fn update_styles(
+    changed_path: &Path,
+    cm: &SourceMap,
+    cache: &mut HashMap<PathBuf, HashSet<String>>,
+    global_classnames: &mut HashSet<String>,
+) {
+    let start = Instant::now();
+    let old_classnames = global_classnames.clone();
+    let new_classnames = process_file(cm, changed_path, cache);
+    global_classnames.extend(new_classnames.clone());
+    let added: Vec<_> = new_classnames.difference(&old_classnames).collect();
+    let removed: Vec<_> = old_classnames.difference(&new_classnames).collect();
+    let added_count = added.len();
+    let removed_count = removed.len();
+    write_css(global_classnames);
+    let duration = start.elapsed();
+    let time_str = if duration.as_millis() < 1 {
+        format!("{}µs", duration.as_micros())
+    } else {
+        format!("{:.1}ms", duration.as_secs_f64() * 1000.0)
+    };
     println!(
-        "{} (+0,-0) -> styles.css (+0,-0) \u{2022} {}ms",
-        changed_path.display(),
-        duration
+        "{} ({}, {}) -> {} ({}, {}) \u{2022} {}",
+        changed_path.display().to_string().yellow(),
+        format!("+{}", added_count).green(),
+        format!("-{}", removed_count).red(),
+        "styles.css".cyan(),
+        format!("+{}", added_count).green(),
+        format!("-{}", removed_count).red(),
+        time_str
     );
 }
 
@@ -81,7 +105,14 @@ fn write_css(classnames: &HashSet<String>) {
 
 fn main() {
     let cm: Lrc<SourceMap> = Default::default();
-    process_all_files(Path::new("initial"), &cm);
+    let mut cache: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let mut global_classnames: HashSet<String> = HashSet::new();
+    for entry in glob("./src/**/*.tsx").expect("Failed to read glob pattern") {
+        if let Ok(path) = entry {
+            global_classnames.extend(process_file(&cm, &path, &mut cache));
+        }
+    }
+    write_css(&global_classnames);
     let (tx, rx) = mpsc::channel();
     let config = Config::default().with_poll_interval(Duration::from_millis(100));
     let mut watcher = RecommendedWatcher::new(tx, config).unwrap();
@@ -97,7 +128,7 @@ fn main() {
                 {
                     for path in paths {
                         if path.extension().and_then(|s| s.to_str()) == Some("tsx") {
-                            process_all_files(&path, &cm);
+                            update_styles(&path, &cm, &mut cache, &mut global_classnames);
                         }
                     }
                 }

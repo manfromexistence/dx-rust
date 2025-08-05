@@ -1,9 +1,9 @@
-export default function Home(){
-    return(
+export default function Home() {
+    return (
         <>
-        <span className="flex hidden">
-            Hello
-        </span>
+            <span className="flex hidden p-4 m-4 text-center">
+                Hello
+            </span>
         </>
     )
 }
