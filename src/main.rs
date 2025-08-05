@@ -88,7 +88,7 @@ fn format_duration(duration: Duration) -> String {
 }
 
 fn initial_scan() -> (HashMap<PathBuf, HashSet<String>>, HashSet<String>) {
-    println!("{}", "🚀 dx-styles starting initial scan...".bold().bright_magenta());
+    println!("{}", "🚀 dx-styles starting initial scan...".bold().bright_purple());
     let start = Instant::now();
     let paths: Vec<_> = glob("./src/**/*.tsx")
         .expect("Failed to read glob pattern")
@@ -105,11 +105,14 @@ fn initial_scan() -> (HashMap<PathBuf, HashSet<String>>, HashSet<String>) {
     write_css(&global_classnames);
     let duration = start.elapsed();
     println!(
-        "{} initial build (+{},-0) -> styles.css (+{},-0) \u{2022} {}",
+        "{} initial build (+{},{}) -> {} (+{},{}) \u{2022} {}",
         "✓".bright_green(),
         global_classnames.len().to_string().bright_green(),
+        "0".bright_red(),
+        "styles.css".bright_yellow(),
         global_classnames.len().to_string().bright_green(),
-        format_duration(duration)
+        "0".bright_red(),
+        format_duration(duration).bright_cyan()
     );
     (file_map, global_classnames)
 }
@@ -126,14 +129,20 @@ fn process_change(
     } else {
         HashSet::new()
     };
-    
-    let source_added_set: HashSet<_> = new_file_classnames.difference(&old_file_classnames).collect();
-    let source_added = source_added_set.len();
-    let source_removed = old_file_classnames.difference(&new_file_classnames).count();
 
-    let display_name = if !source_added_set.is_empty() {
-        let mut id_chars: Vec<char> = source_added_set.iter().filter_map(|s| s.chars().next()).collect();
+    let source_added_set: HashSet<_> = new_file_classnames.difference(&old_file_classnames).collect();
+    let source_removed_set: HashSet<_> = old_file_classnames.difference(&new_file_classnames).collect();
+    let source_added = source_added_set.len();
+    let source_removed = source_removed_set.len();
+
+    let display_name = if !source_added_set.is_empty() || !source_removed_set.is_empty() {
+        let mut id_chars: Vec<char> = source_added_set
+            .iter()
+            .chain(source_removed_set.iter())
+            .filter_map(|s| s.chars().next())
+            .collect();
         id_chars.sort_unstable();
+        id_chars.dedup();
         let id: String = id_chars.into_iter().collect();
         format!("id={}", id)
     } else {
@@ -143,26 +152,43 @@ fn process_change(
     if new_file_classnames.is_empty() && !path.exists() {
         file_map.remove(path);
     } else {
-        file_map.insert(path.to_path_buf(), new_file_classnames);
+        file_map.insert(path.to_path_buf(), new_file_classnames.clone());
     }
 
     let new_global_classnames = calculate_global_classnames(file_map);
-    let output_added = new_global_classnames.difference(old_global_classnames).count();
-    let output_removed = old_global_classnames.difference(&new_global_classnames).count();
+    let output_added_set: HashSet<_> = new_global_classnames.difference(old_global_classnames).collect();
+    let output_removed_set: HashSet<_> = old_global_classnames.difference(&new_global_classnames).collect();
+    let output_added = output_added_set.len();
+    let output_removed = output_removed_set.len();
 
     if output_added > 0 || output_removed > 0 {
         write_css(&new_global_classnames);
     }
 
+    let output_display = if !output_added_set.is_empty() || !output_removed_set.is_empty() {
+        let mut id_chars: Vec<char> = output_added_set
+            .iter()
+            .chain(output_removed_set.iter())
+            .filter_map(|s| s.chars().next())
+            .collect();
+        id_chars.sort_unstable();
+        id_chars.dedup();
+        let id: String = id_chars.into_iter().collect();
+        format!("styles.css(id={})", id)
+    } else {
+        "styles.css".to_string()
+    };
+
     let duration = start.elapsed();
     println!(
-        "{} (+{},-{}) -> styles.css (+{},-{}) \u{2022} {}",
-        display_name.bright_cyan(),
+        "{} (+{},{}) -> {} (+{},{}) \u{2022} {}",
+        display_name.bright_blue(),
         source_added.to_string().bright_green(),
         source_removed.to_string().bright_red(),
+        output_display.bright_yellow(),
         output_added.to_string().bright_green(),
         output_removed.to_string().bright_red(),
-        format_duration(duration)
+        format_duration(duration).bright_cyan()
     );
     Some(new_global_classnames)
 }
@@ -170,40 +196,62 @@ fn process_change(
 fn main() {
     let (mut file_map, mut global_classnames) = initial_scan();
     let (tx, rx) = mpsc::channel();
-    let mut watcher = RecommendedWatcher::new(tx, Config::default().with_poll_interval(Duration::from_millis(200)))
-        .expect("Failed to create file watcher");
+    let mut watcher = RecommendedWatcher::new(
+        tx,
+        Config::default()
+            .with_poll_interval(Duration::from_millis(500))
+            .with_compare_contents(true),
+    )
+    .expect("Failed to create file watcher");
     watcher
         .watch(Path::new("./src"), RecursiveMode::Recursive)
         .expect("Failed to watch ./src directory");
-    println!("{}", "👀 Watching for file changes in ./src...".bright_yellow());
+    println!("{}", "👀 Watching for file changes in ./src...".bold().bright_purple());
 
+    let mut last_processed = Instant::now();
     loop {
-        match rx.recv() {
+        match rx.recv_timeout(Duration::from_millis(1000)) {
             Ok(Ok(event)) => {
+                if last_processed.elapsed() < Duration::from_millis(1000) {
+                    continue;
+                }
                 let mut changed_paths = HashSet::new();
                 for path in event.paths {
-                    if path.extension().and_then(|s| s.to_str()) == Some("tsx") {
+                    if path.extension().and_then(|s| s.to_str()) == Some("tsx")
+                        && path.file_name() != Some(std::ffi::OsStr::new("styles.css"))
+                    {
                         changed_paths.insert(path);
                     }
                 }
-                
-                std::thread::sleep(Duration::from_millis(50));
-                while let Ok(Ok(next_event)) = rx.try_recv() {
-                    for path in next_event.paths {
-                         if path.extension().and_then(|s| s.to_str()) == Some("tsx") {
-                            changed_paths.insert(path);
+
+                let debounce_timeout = Instant::now();
+                while Instant::now().duration_since(debounce_timeout) < Duration::from_millis(300) {
+                    if let Ok(Ok(next_event)) = rx.try_recv() {
+                        for path in next_event.paths {
+                            if path.extension().and_then(|s| s.to_str()) == Some("tsx")
+                                && path.file_name() != Some(std::ffi::OsStr::new("styles.css"))
+                            {
+                                changed_paths.insert(path);
+                            }
                         }
                     }
                 }
 
-                for path in changed_paths {
-                    if let Some(new_globals) = process_change(&path, &mut file_map, &global_classnames) {
-                        global_classnames = new_globals;
+                if !changed_paths.is_empty() {
+                    last_processed = Instant::now();
+                    for path in changed_paths {
+                        if let Some(new_globals) = process_change(&path, &mut file_map, &global_classnames) {
+                            global_classnames = new_globals;
+                        }
                     }
                 }
             }
-            Ok(Err(e)) => eprintln!("{} {:?}", "Watch error:".red().bold(), e),
-            Err(e) => eprintln!("{} {:?}", "Channel error:".red().bold(), e),
+            Ok(Err(e)) => eprintln!("{} {:?}", "Watch error:".bright_red().bold(), e),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("{} Channel disconnected", "Error:".bright_red().bold());
+                break;
+            }
         }
     }
 }
