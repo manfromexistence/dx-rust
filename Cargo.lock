@@ -389,6 +389,7 @@ dependencies = [
  "memmap2",
  "notify",
  "rayon",
+ "regex",
  "swc",
  "swc_common",
  "swc_ecma_ast",

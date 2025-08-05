@@ -3,10 +3,11 @@ use glob::glob;
 use memmap2::Mmap;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -27,6 +28,51 @@ struct ClassNameCollector<'a> {
 
 impl<'a> VisitMut for ClassNameCollector<'a> {
     fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
+        elem.visit_mut_children_with(self); // Ensure children are visited
+
+        let mut classnames_on_element = Vec::new();
+        let mut has_classname_attr = false;
+
+        for attr in &elem.attrs {
+            if let JSXAttrOrSpread::JSXAttr(attr) = attr {
+                if let JSXAttrName::Ident(ident) = &attr.name {
+                    if ident.sym == "className" {
+                        has_classname_attr = true;
+                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
+                            if !s.value.is_empty() {
+                                classnames_on_element = s.value.split_whitespace().collect();
+                                for classname in &classnames_on_element {
+                                    self.classnames.insert(classname.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_classname_attr && !classnames_on_element.is_empty() {
+            let mut id_chars: Vec<char> = classnames_on_element
+                .iter()
+                .filter_map(|s| s.chars().next())
+                .collect();
+            id_chars.sort_unstable();
+            id_chars.dedup();
+            let id: String = id_chars.into_iter().collect();
+            self.ids.insert(id);
+        }
+    }
+}
+
+// OPTIMIZATION: This visitor now checks if the correct `id` already exists.
+// It will only modify the AST if the `id` is missing or incorrect.
+// This prevents unnecessary code generation and file writes for already-correct files.
+struct IdAdder;
+
+impl VisitMut for IdAdder {
+    fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
+        elem.visit_mut_children_with(self); // Traverse deeper first
+
         let mut classnames = Vec::new();
         let mut has_classname = false;
 
@@ -35,10 +81,9 @@ impl<'a> VisitMut for ClassNameCollector<'a> {
                 if let JSXAttrName::Ident(ident) = &attr.name {
                     if ident.sym == "className" {
                         if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                            classnames = s.value.split_whitespace().collect();
-                            has_classname = true;
-                            for classname in &classnames {
-                                self.classnames.insert(classname.to_string());
+                            if !s.value.is_empty() {
+                                classnames = s.value.split_whitespace().collect();
+                                has_classname = true;
                             }
                         }
                     }
@@ -50,58 +95,54 @@ impl<'a> VisitMut for ClassNameCollector<'a> {
             let mut id_chars: Vec<char> = classnames.iter().filter_map(|s| s.chars().next()).collect();
             id_chars.sort_unstable();
             id_chars.dedup();
-            let id: String = id_chars.into_iter().collect();
-            self.ids.insert(id);
-        }
-    }
-}
+            let new_id: String = id_chars.into_iter().collect();
 
-struct IdAdder;
+            let mut has_correct_id = false;
+            let mut has_any_id = false;
 
-impl VisitMut for IdAdder {
-    fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
-        let mut classnames = Vec::new();
-        let mut has_classname = false;
-
-        for attr in &elem.attrs {
-            if let JSXAttrOrSpread::JSXAttr(attr) = attr {
-                if let JSXAttrName::Ident(ident) = &attr.name {
-                    if ident.sym == "className" {
-                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                            classnames = s.value.split_whitespace().collect();
-                            has_classname = true;
+            // Check for an existing 'id' attribute.
+            for attr in &elem.attrs {
+                if let JSXAttrOrSpread::JSXAttr(a) = attr {
+                    if let JSXAttrName::Ident(ident) = &a.name {
+                        if ident.sym == "id" {
+                            has_any_id = true;
+                            if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &a.value {
+                                if s.value.as_ref() == new_id {
+                                    has_correct_id = true;
+                                }
+                            }
+                            break;
                         }
                     }
                 }
             }
-        }
 
-        if has_classname {
-            let mut id_chars: Vec<char> = classnames.iter().filter_map(|s| s.chars().next()).collect();
-            id_chars.sort_unstable();
-            id_chars.dedup();
-            let id: String = id_chars.into_iter().collect();
-
-            let id_attr = JSXAttrOrSpread::JSXAttr(JSXAttr {
-                name: JSXAttrName::Ident(IdentName::new("id".into(), Default::default())),
-                value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                    value: id.into(),
-                    span: Default::default(),
-                    raw: None,
-                }))),
-                span: Default::default(),
-            });
-
-            elem.attrs.retain(|attr| {
-                if let JSXAttrOrSpread::JSXAttr(a) = attr {
-                    if let JSXAttrName::Ident(ident) = &a.name {
-                        return ident.sym != "id";
-                    }
+            // Only modify the AST if we don't already have the correct id.
+            if !has_correct_id {
+                // Remove the old 'id' attribute if it exists.
+                if has_any_id {
+                    elem.attrs.retain(|attr| {
+                        if let JSXAttrOrSpread::JSXAttr(a) = attr {
+                            if let JSXAttrName::Ident(ident) = &a.name {
+                                return ident.sym != "id";
+                            }
+                        }
+                        true
+                    });
                 }
-                true
-            });
 
-            elem.attrs.push(id_attr);
+                // Add the new, correct 'id' attribute.
+                let id_attr = JSXAttrOrSpread::JSXAttr(JSXAttr {
+                    name: JSXAttrName::Ident(IdentName::new("id".into(), Default::default())),
+                    value: Some(JSXAttrValue::Lit(Lit::Str(Str {
+                        value: new_id.into(),
+                        span: Default::default(),
+                        raw: None,
+                    }))),
+                    span: Default::default(),
+                });
+                elem.attrs.push(id_attr);
+            }
         }
     }
 }
@@ -127,7 +168,10 @@ fn parse_and_modify_file(
         None,
     );
     let mut parser = Parser::new_from(lexer);
-    let mut module = parser.parse_module().ok()?;
+    let mut module = match parser.parse_module() {
+        Ok(module) => module,
+        Err(_) => return None,
+    };
 
     let mut local_classnames = HashSet::new();
     let mut local_ids = HashSet::new();
@@ -173,6 +217,45 @@ fn calculate_global_classnames_and_ids(
         .flat_map(|(_, (_, ids))| ids.clone())
         .collect();
     (classnames, ids)
+}
+
+// NEW: Helper function to read existing classes and IDs from a CSS file.
+// This helps prevent rewriting the file if nothing has changed.
+fn read_existing_css(path: &Path) -> (HashSet<String>, HashSet<String>) {
+    let mut classes = HashSet::new();
+    let mut ids = HashSet::new();
+
+    if !path.exists() {
+        return (classes, ids);
+    }
+
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (classes, ids),
+    };
+
+    // This regex is simple but effective for the format this tool generates.
+    let re = match Regex::new(r"^\s*[.#]([\w-]+)") {
+        Ok(re) => re,
+        Err(_) => return (classes, ids),
+    };
+
+    for line in BufReader::new(file).lines() {
+        if let Ok(line_content) = line {
+            if let Some(caps) = re.captures(&line_content) {
+                if let Some(name_match) = caps.get(1) {
+                    let name = name_match.as_str().to_string();
+                    if line_content.trim().starts_with('.') {
+                        classes.insert(name);
+                    } else if line_content.trim().starts_with('#') {
+                        ids.insert(name);
+                    }
+                }
+            }
+        }
+    }
+
+    (classes, ids)
 }
 
 fn write_css(classnames: &HashSet<String>, ids: &HashSet<String>, output_path: &Path) {
@@ -223,18 +306,30 @@ fn initial_scan() -> (
     let file_map: HashMap<PathBuf, (HashSet<String>, HashSet<String>)> = paths
         .par_iter()
         .filter_map(|path| {
-            let (classnames, ids, modified_code, original_code) =
-                parse_and_modify_file(path, &cm)?;
-            if original_code != modified_code {
-                write_file(path, &modified_code);
+            if let Some((classnames, ids, modified_code, original_code)) =
+                parse_and_modify_file(path, &cm)
+            {
+                // The optimized IdAdder reduces how often this is true.
+                if original_code != modified_code {
+                    write_file(path, &modified_code);
+                }
+                Some((path.clone(), (classnames, ids)))
+            } else {
+                None
             }
-            Some((path.clone(), (classnames, ids)))
         })
         .collect();
-        
+
     let (global_classnames, global_ids) = calculate_global_classnames_and_ids(&file_map);
     let output_path = PathBuf::from("./styles.css");
-    write_css(&global_classnames, &global_ids, &output_path);
+
+    // OPTIMIZATION: Check if the CSS file needs to be written at all.
+    // This compares the newly generated sets with what's already on disk.
+    let (existing_classnames, existing_ids) = read_existing_css(&output_path);
+    if global_classnames != existing_classnames || global_ids != existing_ids {
+        println!("{}", "CSS changes detected, regenerating styles.css...".yellow());
+        write_css(&global_classnames, &global_ids, &output_path);
+    }
 
     let duration = start.elapsed();
     println!(
@@ -256,7 +351,7 @@ fn process_change(
 ) -> Option<(HashSet<String>, HashSet<String>)> {
     let start = Instant::now();
     let cm: Arc<SourceMap> = Default::default();
-    
+
     let (old_file_classnames, _) = file_map.get(path).cloned().unwrap_or_default();
 
     let (new_file_classnames, new_file_ids, modified_code, original_code) = if path.exists() {
@@ -265,6 +360,7 @@ fn process_change(
         (HashSet::new(), HashSet::new(), String::new(), String::new())
     };
 
+    // If the file exists but our optimized visitors made no changes, we can stop early.
     if path.exists() && original_code == modified_code {
         return None;
     }
@@ -277,10 +373,15 @@ fn process_change(
     } else {
         file_map.remove(path);
     }
-    
+
     let (new_global_classnames, new_global_ids) = calculate_global_classnames_and_ids(file_map);
 
+    // If the global sets haven't changed, no need to write CSS.
     if &new_global_classnames == old_global_classnames && &new_global_ids == old_global_ids {
+        // Still write the source file if it changed
+        if path.exists() && original_code != modified_code {
+            write_file(path, &modified_code);
+        }
         return Some((new_global_classnames, new_global_ids));
     }
 
@@ -294,12 +395,14 @@ fn process_change(
     let path_str = path.to_string_lossy().to_string();
     let display_name = path_str.bright_blue();
 
-    let output_added = new_global_classnames.difference(old_global_classnames).count() + new_global_ids.difference(old_global_ids).count();
-    let output_removed = old_global_classnames.difference(&new_global_classnames).count() + old_global_ids.difference(&new_global_ids).count();
+    let output_added = new_global_classnames.difference(old_global_classnames).count()
+        + new_global_ids.difference(old_global_ids).count();
+    let output_removed = old_global_classnames.difference(&new_global_classnames).count()
+        + old_global_ids.difference(&new_global_ids).count();
 
     let output_path = PathBuf::from("./styles.css");
     write_css(&new_global_classnames, &new_global_ids, &output_path);
-    
+
     let output_path_str = output_path
         .canonicalize()
         .unwrap_or(output_path.clone())
@@ -318,7 +421,7 @@ fn process_change(
         output_removed.to_string().bright_red(),
         format_duration(duration).bright_cyan()
     );
-    
+
     Some((new_global_classnames, new_global_ids))
 }
 
@@ -335,7 +438,7 @@ fn main() {
     watcher
         .watch(&watch_path, RecursiveMode::Recursive)
         .expect("Failed to watch ./src directory");
-        
+
     println!(
         "{}",
         "👀 Watching for file changes in ./src...".bold().bright_purple()
