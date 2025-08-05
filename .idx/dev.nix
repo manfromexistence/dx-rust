@@ -18,7 +18,7 @@
     ];
     workspace = {
       onCreate = {
-        install = "rustup default stable && rustup update && cargo run";
+        install = "rustup default stable && rustup update && cargo install cargo-pgo";
         default.openFiles = [
           "README.md"
         ];

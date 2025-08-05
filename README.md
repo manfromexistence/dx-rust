@@ -617,4 +617,51 @@ swc_ecma_visit = "14.0.0"
 cc = "1.0"
 
 
-cargo add notify swc swc_common swc_ecma_parser swc_ecma_ast swc_ecma_visit glob
+[dependencies]
+[dependencies]
+glob = "0.3.2"
+swc = "33.0.0"
+swc_common = "14.0.2"
+swc_ecma_ast = "14.0.0"
+swc_ecma_parser = "22.0.3"
+swc_ecma_visit = "14.0.0"
+swc_ecma_minifier = "2.1.3"
+colored = "2.1.0"
+rayon = "1.10.0"
+tokio = { version = "1.40.0", features = ["full"] }
+bincode = "1.3.3"
+rkyv = { version = "0.7.44", features = ["validation"] }
+zstd = "0.13.2"
+ahash = "0.8.11"
+blake3 = "1.5.4"
+polling = "3.7.3"
+memmap2 = "0.9.5"
+
+[dependencies.mimalloc]
+version = "0.1.43"
+features = ["secure"]
+
+[dependencies.wasm-bindgen]
+version = "0.2.95"
+optional = true
+
+[features]
+wasm = ["wasm-bindgen"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[[bin]]
+name = "dx-styles"
+path = "src/main.rs"
+
+[[bin]]
+name = "dx-styles-wasm"
+path = "src/wasm.rs"
+required-features = ["wasm"]
+
+cargo add notify swc swc_common swc_ecma_parser swc_ecma_ast swc_ecma_visit glob colored rayon xxhash-rust tokio serde serde_json
+
+cargo add swc swc_common swc_ecma_ast swc_ecma_parser swc_ecma_visit swc_ecma_minifier glob colored rayon tokio bincode rkyv zstd ahash blake3 polling memmap2 mimalloc wasm-bindgen lru crossbeam
