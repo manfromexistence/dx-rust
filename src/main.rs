@@ -2,15 +2,15 @@ use colored::*;
 use glob::glob;
 use memmap2::Mmap;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use swc_common::{sync::Lrc, FileName, SourceMap};
-use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, JSXAttr, Ident, Str, JSXElementName};
+use swc_common::{FileName, SourceMap};
+use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, JSXAttr, IdentName, Str};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_visit::{Visit, VisitWith, VisitMut, VisitMutWith};
 use swc_ecma_codegen::{Emitter, text_writer::JsWriter};
@@ -65,7 +65,7 @@ impl VisitMut for IdAdder {
             let id: String = id_chars.into_iter().collect();
 
             let id_attr = JSXAttrOrSpread::JSXAttr(JSXAttr {
-                name: JSXAttrName::Ident(Ident::new("id".into(), Default::default())),
+                name: JSXAttrName::Ident(IdentName::new("id".into(), Default::default())),
                 value: Some(JSXAttrValue::Lit(Lit::Str(Str {
                     value: id.into(),
                     span: Default::default(),
@@ -90,7 +90,7 @@ impl VisitMut for IdAdder {
     }
 }
 
-fn parse_and_modify_file(path: &Path, cm: &Lrc<SourceMap>) -> Option<(HashSet<String>, String)> {
+fn parse_and_modify_file(path: &Path, cm: &Rc<SourceMap>) -> Option<(HashSet<String>, String)> {
     let file = File::open(path).ok()?;
     let mmap = unsafe { Mmap::map(&file).ok()? };
     let source = String::from_utf8_lossy(&mmap).to_string();
@@ -164,13 +164,13 @@ fn format_duration(duration: Duration) -> String {
 fn initial_scan() -> (HashMap<PathBuf, HashSet<String>>, HashSet<String>) {
     println!("{}", "🚀 dx-styles starting initial scan...".bold().bright_purple());
     let start = Instant::now();
-    let cm: Lrc<SourceMap> = Default::default();
+    let cm: Rc<SourceMap> = Default::default();
     let paths: Vec<_> = glob("./src/**/*.tsx")
         .expect("Failed to read glob pattern")
         .filter_map(Result::ok)
         .collect();
     let file_map: HashMap<PathBuf, HashSet<String>> = paths
-        .par_iter()
+        .iter()
         .filter_map(|path| {
             let (classnames, modified_code) = parse_and_modify_file(path, &cm)?;
             write_file(path, &modified_code);
@@ -199,7 +199,7 @@ fn process_change(
     old_global_classnames: &HashSet<String>,
 ) -> Option<HashSet<String>> {
     let start = Instant::now();
-    let cm: Lrc<SourceMap> = Default::default();
+    let cm: Rc<SourceMap> = Default::default();
     let old_file_classnames = file_map.get(path).cloned().unwrap_or_default();
 
     let (new_file_classnames, modified_code) = if path.exists() {
