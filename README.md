@@ -615,3 +615,6 @@ swc_ecma_visit = "14.0.0"
 
 [build-dependencies]
 cc = "1.0"
+
+
+cargo add notify swc swc_common swc_ecma_parser swc_ecma_ast swc_ecma_visit glob
