@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use swc_common::{sync::Lrc, FileName, SourceMap};
-use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit};
+use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, JSXAttr, Ident, Str, JSXElementName};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
-use swc_ecma_visit::{Visit, VisitWith};
+use swc_ecma_visit::{Visit, VisitWith, VisitMut, VisitMutWith};
+use swc_ecma_codegen::{Emitter, text_writer::JsWriter};
 
 struct ClassNameCollector<'a> {
     classnames: &'a mut HashSet<String>,
@@ -37,13 +38,65 @@ impl<'a> Visit for ClassNameCollector<'a> {
     }
 }
 
-fn parse_file(path: &Path) -> Option<HashSet<String>> {
+struct IdAdder;
+
+impl VisitMut for IdAdder {
+    fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
+        let mut classnames = Vec::new();
+        let mut has_classname = false;
+
+        for attr in &elem.attrs {
+            if let JSXAttrOrSpread::JSXAttr(attr) = attr {
+                if let JSXAttrName::Ident(ident) = &attr.name {
+                    if ident.sym == "className" {
+                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
+                            classnames = s.value.split_whitespace().collect();
+                            has_classname = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if has_classname {
+            let mut id_chars: Vec<char> = classnames.iter().filter_map(|s| s.chars().next()).collect();
+            id_chars.sort_unstable();
+            id_chars.dedup();
+            let id: String = id_chars.into_iter().collect();
+
+            let id_attr = JSXAttrOrSpread::JSXAttr(JSXAttr {
+                name: JSXAttrName::Ident(Ident::new("id".into(), Default::default())),
+                value: Some(JSXAttrValue::Lit(Lit::Str(Str {
+                    value: id.into(),
+                    span: Default::default(),
+                    raw: None,
+                }))),
+                span: Default::default(),
+            });
+
+            elem.attrs.retain(|attr| {
+                if let JSXAttrOrSpread::JSXAttr(a) = attr {
+                    if let JSXAttrName::Ident(ident) = &a.name {
+                        return ident.sym != "id";
+                    }
+                }
+                true
+            });
+
+            elem.attrs.push(id_attr);
+        }
+
+        elem.visit_mut_children_with(self);
+    }
+}
+
+fn parse_and_modify_file(path: &Path, cm: &Lrc<SourceMap>) -> Option<(HashSet<String>, String)> {
     let file = File::open(path).ok()?;
     let mmap = unsafe { Mmap::map(&file).ok()? };
-    let cm: Lrc<SourceMap> = Default::default();
+    let source = String::from_utf8_lossy(&mmap).to_string();
     let fm = cm.new_source_file(
         FileName::Real(path.to_path_buf()).into(),
-        String::from_utf8_lossy(&mmap).to_string(),
+        source.clone(),
     );
     let lexer = Lexer::new(
         Syntax::Typescript(TsSyntax {
@@ -55,13 +108,34 @@ fn parse_file(path: &Path) -> Option<HashSet<String>> {
         None,
     );
     let mut parser = Parser::new_from(lexer);
-    let module = parser.parse_module().ok()?;
+    let mut module = parser.parse_module().ok()?;
+
     let mut local_classnames = HashSet::new();
     let mut collector = ClassNameCollector {
         classnames: &mut local_classnames,
     };
     module.visit_with(&mut collector);
-    Some(local_classnames)
+
+    let mut id_adder = IdAdder;
+    module.visit_mut_with(&mut id_adder);
+
+    let mut output = Vec::new();
+    let mut emitter = Emitter {
+        cfg: Default::default(),
+        cm: cm.clone(),
+        comments: None,
+        wr: JsWriter::new(cm.clone(), "\n", &mut output, None),
+    };
+    emitter.emit_module(&module).ok()?;
+    let modified_code = String::from_utf8(output).ok()?;
+
+    Some((local_classnames, modified_code))
+}
+
+fn write_file(path: &Path, content: &str) {
+    let file = File::create(path).expect("Could not create file");
+    let mut writer = BufWriter::new(file);
+    writer.write_all(content.as_bytes()).expect("Failed to write to file");
 }
 
 fn calculate_global_classnames(file_map: &HashMap<PathBuf, HashSet<String>>) -> HashSet<String> {
@@ -90,6 +164,7 @@ fn format_duration(duration: Duration) -> String {
 fn initial_scan() -> (HashMap<PathBuf, HashSet<String>>, HashSet<String>) {
     println!("{}", "🚀 dx-styles starting initial scan...".bold().bright_purple());
     let start = Instant::now();
+    let cm: Lrc<SourceMap> = Default::default();
     let paths: Vec<_> = glob("./src/**/*.tsx")
         .expect("Failed to read glob pattern")
         .filter_map(Result::ok)
@@ -97,7 +172,8 @@ fn initial_scan() -> (HashMap<PathBuf, HashSet<String>>, HashSet<String>) {
     let file_map: HashMap<PathBuf, HashSet<String>> = paths
         .par_iter()
         .filter_map(|path| {
-            let classnames = parse_file(path)?;
+            let (classnames, modified_code) = parse_and_modify_file(path, &cm)?;
+            write_file(path, &modified_code);
             Some((path.clone(), classnames))
         })
         .collect();
@@ -123,11 +199,13 @@ fn process_change(
     old_global_classnames: &HashSet<String>,
 ) -> Option<HashSet<String>> {
     let start = Instant::now();
+    let cm: Lrc<SourceMap> = Default::default();
     let old_file_classnames = file_map.get(path).cloned().unwrap_or_default();
-    let new_file_classnames = if path.exists() {
-        parse_file(path).unwrap_or_default()
+
+    let (new_file_classnames, modified_code) = if path.exists() {
+        parse_and_modify_file(path, &cm).unwrap_or_default()
     } else {
-        HashSet::new()
+        (HashSet::new(), String::new())
     };
 
     let source_added_set: HashSet<_> = new_file_classnames.difference(&old_file_classnames).collect();
@@ -135,10 +213,9 @@ fn process_change(
     let source_added = source_added_set.len();
     let source_removed = source_removed_set.len();
 
-    let display_name = if !source_added_set.is_empty() || !source_removed_set.is_empty() {
+    let display_name = if !source_added_set.is_empty() {
         let mut id_chars: Vec<char> = source_added_set
             .iter()
-            .chain(source_removed_set.iter())
             .filter_map(|s| s.chars().next())
             .collect();
         id_chars.sort_unstable();
@@ -148,6 +225,10 @@ fn process_change(
     } else {
         path.strip_prefix("./").unwrap_or(path).to_string_lossy().to_string()
     };
+
+    if path.exists() {
+        write_file(path, &modified_code);
+    }
 
     if new_file_classnames.is_empty() && !path.exists() {
         file_map.remove(path);
