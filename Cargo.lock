@@ -393,7 +393,7 @@ dependencies = [
  "swc_common 12.0.1",
  "swc_ecma_ast 12.0.0",
  "swc_ecma_codegen 14.0.0",
- "swc_ecma_parser 14.0.2",
+ "swc_ecma_parser 12.0.0",
  "swc_ecma_visit 12.0.0",
 ]
 
@@ -1570,9 +1570,9 @@ dependencies = [
 
 [[package]]
 name = "swc_common"
-version = "11.1.3"
+version = "9.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44c332906667b0fa98622f19a19e43afa5aa63b652813f80645dd0f33eca1fbb"
+checksum = "a56b6f5a8e5affa271b56757a93badee6f44defcd28f3ba106bb2603afe40d3d"
 dependencies = [
  "anyhow",
  "ast_node",
@@ -1712,9 +1712,9 @@ dependencies = [
 
 [[package]]
 name = "swc_ecma_ast"
-version = "11.0.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2313360a518a37c4b9ee50030d189222927a3af902903cc70c50f6929e402dc"
+checksum = "0613d84468a6bb6d45d13c5a3368b37bd21f3067a089f69adac630dcb462a018"
 dependencies = [
  "bitflags 2.9.1",
  "is-macro",
@@ -1725,7 +1725,7 @@ dependencies = [
  "scoped-tls",
  "string_enum",
  "swc_atoms 5.0.0",
- "swc_common 11.1.3",
+ "swc_common 9.2.0",
  "swc_visit",
  "unicode-id-start",
 ]
@@ -2049,9 +2049,9 @@ dependencies = [
 
 [[package]]
 name = "swc_ecma_lexer"
-version = "14.0.5"
+version = "12.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb339d30ba6ee93da5d5638982faaa79586cd429fe331648abf42afa0eb0a7b5"
+checksum = "0d11c8e71901401b9aae2ece4946eeb7674b14b8301a53768afbbeeb0e48b599"
 dependencies = [
  "arrayvec",
  "bitflags 2.9.1",
@@ -2066,8 +2066,8 @@ dependencies = [
  "smartstring",
  "stacker",
  "swc_atoms 5.0.0",
- "swc_common 11.1.3",
- "swc_ecma_ast 11.0.0",
+ "swc_common 9.2.0",
+ "swc_ecma_ast 9.0.0",
  "tracing",
  "typed-arena",
 ]
@@ -2176,9 +2176,9 @@ dependencies = [
 
 [[package]]
 name = "swc_ecma_parser"
-version = "14.0.2"
+version = "12.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60e07e6ecd47f748988902976d09c4022b1147772f88ad8a95852a20722ac7dc"
+checksum = "250786944fbc05f6484eda9213df129ccfe17226ae9ad51b62fce2f72135dbee"
 dependencies = [
  "arrayvec",
  "bitflags 2.9.1",
@@ -2193,9 +2193,9 @@ dependencies = [
  "smartstring",
  "stacker",
  "swc_atoms 5.0.0",
- "swc_common 11.1.3",
- "swc_ecma_ast 11.0.0",
- "swc_ecma_lexer 14.0.5",
+ "swc_common 9.2.0",
+ "swc_ecma_ast 9.0.0",
+ "swc_ecma_lexer 12.0.0",
  "tracing",
  "typed-arena",
 ]

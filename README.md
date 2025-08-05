@@ -665,3 +665,7 @@ required-features = ["wasm"]
 cargo add notify swc swc_common swc_ecma_parser swc_ecma_ast swc_ecma_visit glob colored rayon xxhash-rust tokio serde serde_json
 
 cargo add swc swc_common swc_ecma_ast swc_ecma_parser swc_ecma_visit swc_ecma_minifier glob colored rayon tokio bincode rkyv zstd ahash blake3 polling memmap2 mimalloc wasm-bindgen lru crossbeam
+
+
+
+cargo add colored glob memmap2 notify rayon swc swc_common swc_ecma_ast swc_ecma_parser swc_ecma_visit swc_ecma_codegen
