@@ -6,11 +6,11 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use swc_common::{sync::Lrc, FileName, SourceMap};
-use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, Module};
+use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -65,7 +65,8 @@ fn process_all_files(change_reason: &str) {
             // Each parallel thread needs its own SourceMap instance for thread-safety.
             let cm: Lrc<SourceMap> = Default::default();
             let fm = cm.new_source_file(
-                FileName::Real(path.clone()),
+                // FIX: Convert FileName to Arc<FileName> using .into()
+                FileName::Real(path.clone()).into(),
                 String::from_utf8_lossy(&mmap).to_string(),
             );
 
