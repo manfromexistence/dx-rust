@@ -152,7 +152,7 @@ struct JSXPruner;
 
 impl VisitMut for JSXPruner {
     fn visit_mut_module(&mut self, module: &mut Module) {
-        module.body.retain(|item| matches!(item, swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::TsInterface(_))) || item.is_module_decl());
+        module.body.retain(item| matches!(item, swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(swc_ecma_ast::Decl::TsInterface(_))) || item.is_module_decl());
         for item in &mut module.body {
             if let swc_ecma_ast::ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(expr)) = item {
                 expr.visit_mut_children_with(self);
