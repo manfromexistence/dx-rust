@@ -41,8 +41,26 @@ struct JSXOnlyCollector<'a> {
 
 impl<'a> Visit for JSXOnlyCollector<'a> {
     fn visit_jsx_opening_element(&mut self, elem: &JSXOpeningElement) {
-        for attr in &elem.attrs {
-            if let JSXAttrOrSpread::JSXAttr(attr) = attr {
+        let attrs = &elem.attrs;
+        let mut i = 0;
+        while i < attrs.len() {
+            if let (Some(JSXAttrOrSpread::JSXAttr(attr1)), Some(JSXAttrOrSpread::JSXAttr(attr2))) = (attrs.get(i), attrs.get(i + 1)) {
+                if let JSXAttrName::Ident(ident) = &attr1.name {
+                    if ident.sym == "className" {
+                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr1.value {
+                            self.classnames.extend(s.value.split_whitespace().map(String::from));
+                        }
+                    }
+                }
+                if let JSXAttrName::Ident(ident) = &attr2.name {
+                    if ident.sym == "className" {
+                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr2.value {
+                            self.classnames.extend(s.value.split_whitespace().map(String::from));
+                        }
+                    }
+                }
+                i += 2;
+            } else if let Some(JSXAttrOrSpread::JSXAttr(attr)) = attrs.get(i) {
                 if let JSXAttrName::Ident(ident) = &attr.name {
                     if ident.sym == "className" {
                         if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
@@ -50,6 +68,9 @@ impl<'a> Visit for JSXOnlyCollector<'a> {
                         }
                     }
                 }
+                i += 1;
+            } else {
+                i += 1;
             }
         }
     }
