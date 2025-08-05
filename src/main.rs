@@ -4,7 +4,7 @@ use memmap2::Mmap;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -13,138 +13,169 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use swc_common::{FileName, SourceMap};
+use swc_common::{Span, SourceMap, FileName};
 use swc_ecma_ast::{
-    IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, Str,
+    IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, Str, Module,
 };
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
-use swc_ecma_visit::{VisitMut, VisitMutWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-struct ClassNameCollector<'a> {
-    classnames: &'a mut HashSet<String>,
-    ids: &'a mut HashSet<String>,
+fn is_generated_like_id(id: &str, expected_id_chars: &HashSet<char>) -> bool {
+    let id_chars: HashSet<char> = id.chars().filter(|c| !c.is_digit(10)).collect();
+    id_chars.is_subset(expected_id_chars) && id_chars.len() == expected_id_chars.len()
 }
 
-impl<'a> VisitMut for ClassNameCollector<'a> {
-    fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
-        elem.visit_mut_children_with(self); // Ensure children are visited
+#[derive(Debug, Clone)]
+struct ElementInfo {
+    span: Span,
+    class_names: Vec<String>,
+    current_id: Option<String>,
+}
 
-        let mut classnames_on_element = Vec::new();
-        let mut has_classname_attr = false;
+struct InfoCollector {
+    elements: Vec<ElementInfo>,
+}
+
+impl Visit for InfoCollector {
+    fn visit_jsx_opening_element(&mut self, elem: &JSXOpeningElement) {
+        let mut class_names = Vec::new();
+        let mut current_id = None;
 
         for attr in &elem.attrs {
             if let JSXAttrOrSpread::JSXAttr(attr) = attr {
                 if let JSXAttrName::Ident(ident) = &attr.name {
-                    if ident.sym == "className" {
-                        has_classname_attr = true;
-                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                            if !s.value.is_empty() {
-                                classnames_on_element = s.value.split_whitespace().collect();
-                                for classname in &classnames_on_element {
-                                    self.classnames.insert(classname.to_string());
+                    match ident.sym.as_ref() {
+                        "className" => {
+                            if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
+                                if !s.value.is_empty() {
+                                    class_names = s.value.split_whitespace().map(String::from).collect();
                                 }
                             }
                         }
+                        "id" => {
+                            if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
+                                if !s.value.is_empty() {
+                                    current_id = Some(s.value.to_string());
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
 
-        if has_classname_attr && !classnames_on_element.is_empty() {
-            let mut id_chars: Vec<char> = classnames_on_element
-                .iter()
-                .filter_map(|s| s.chars().next())
-                .collect();
-            id_chars.sort_unstable();
-            id_chars.dedup();
-            let id: String = id_chars.into_iter().collect();
-            self.ids.insert(id);
+        if !class_names.is_empty() || current_id.is_some() {
+            self.elements.push(ElementInfo {
+                span: elem.span,
+                class_names,
+                current_id,
+            });
         }
+        
+        elem.visit_children_with(self);
     }
 }
 
-// OPTIMIZATION: This visitor now checks if the correct `id` already exists.
-// It will only modify the AST if the `id` is missing or incorrect.
-// This prevents unnecessary code generation and file writes for already-correct files.
-struct IdAdder;
+struct IdApplier<'a> {
+    id_map: &'a HashMap<Span, String>,
+}
 
-impl VisitMut for IdAdder {
+impl<'a> VisitMut for IdApplier<'a> {
     fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
-        elem.visit_mut_children_with(self); // Traverse deeper first
-
-        let mut classnames = Vec::new();
-        let mut has_classname = false;
-
-        for attr in &elem.attrs {
-            if let JSXAttrOrSpread::JSXAttr(attr) = attr {
-                if let JSXAttrName::Ident(ident) = &attr.name {
-                    if ident.sym == "className" {
-                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                            if !s.value.is_empty() {
-                                classnames = s.value.split_whitespace().collect();
-                                has_classname = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if has_classname {
-            let mut id_chars: Vec<char> = classnames.iter().filter_map(|s| s.chars().next()).collect();
-            id_chars.sort_unstable();
-            id_chars.dedup();
-            let new_id: String = id_chars.into_iter().collect();
-
-            let mut has_correct_id = false;
-            let mut has_any_id = false;
-
-            // Check for an existing 'id' attribute.
-            for attr in &elem.attrs {
-                if let JSXAttrOrSpread::JSXAttr(a) = attr {
-                    if let JSXAttrName::Ident(ident) = &a.name {
+        if let Some(new_id) = self.id_map.get(&elem.span) {
+            let mut has_id_attr = false;
+            for attr in &mut elem.attrs {
+                if let JSXAttrOrSpread::JSXAttr(jsx_attr) = attr {
+                    if let JSXAttrName::Ident(ident) = &jsx_attr.name {
                         if ident.sym == "id" {
-                            has_any_id = true;
-                            if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &a.value {
-                                if s.value.as_ref() == new_id {
-                                    has_correct_id = true;
-                                }
-                            }
+                            jsx_attr.value = Some(JSXAttrValue::Lit(Lit::Str(Str {
+                                value: new_id.clone().into(),
+                                span: Default::default(),
+                                raw: None,
+                            })));
+                            has_id_attr = true;
                             break;
                         }
                     }
                 }
             }
 
-            // Only modify the AST if we don't already have the correct id.
-            if !has_correct_id {
-                // Remove the old 'id' attribute if it exists.
-                if has_any_id {
-                    elem.attrs.retain(|attr| {
-                        if let JSXAttrOrSpread::JSXAttr(a) = attr {
-                            if let JSXAttrName::Ident(ident) = &a.name {
-                                return ident.sym != "id";
-                            }
-                        }
-                        true
-                    });
-                }
-
-                // Add the new, correct 'id' attribute.
-                let id_attr = JSXAttrOrSpread::JSXAttr(JSXAttr {
+            if !has_id_attr {
+                elem.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
                     name: JSXAttrName::Ident(IdentName::new("id".into(), Default::default())),
                     value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                        value: new_id.into(),
+                        value: new_id.clone().into(),
                         span: Default::default(),
                         raw: None,
                     }))),
                     span: Default::default(),
-                });
-                elem.attrs.push(id_attr);
+                }));
             }
         }
+        elem.visit_mut_children_with(self);
     }
+}
+
+fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, HashSet<String>, HashMap<Span, String>) {
+    let mut info_collector = InfoCollector { elements: Vec::new() };
+    info_collector.visit_module(&module);
+
+    let mut final_ids = HashSet::new();
+    let mut final_classnames = HashSet::new();
+    let mut id_updates = HashMap::new();
+    let mut base_id_counts = HashMap::new();
+    let mut elements_by_base_id: BTreeMap<String, Vec<ElementInfo>> = BTreeMap::new();
+
+    for el in &info_collector.elements {
+        for cn in &el.class_names {
+            final_classnames.insert(cn.clone());
+        }
+
+        if el.class_names.is_empty() {
+            if let Some(id) = &el.current_id {
+                final_ids.insert(id.clone());
+            }
+            continue;
+        }
+
+        let mut id_chars: Vec<char> = el.class_names.iter().filter_map(|s| s.chars().next()).collect();
+        id_chars.sort_unstable();
+        id_chars.dedup();
+        let expected_id: String = id_chars.into_iter().collect();
+        let expected_id_chars: HashSet<char> = expected_id.chars().collect();
+
+        let should_manage_id = match &el.current_id {
+            Some(id) => is_generated_like_id(id, &expected_id_chars),
+            None => true,
+        };
+
+        if should_manage_id {
+            elements_by_base_id.entry(expected_id.clone()).or_insert_with(Vec::new).push(el.clone());
+            *base_id_counts.entry(expected_id).or_insert(0) += 1;
+        } else if let Some(id) = &el.current_id {
+            final_ids.insert(id.clone());
+        }
+    }
+
+    for (base_id, elements) in elements_by_base_id {
+        let count = base_id_counts.get(&base_id).cloned().unwrap_or(0);
+        if count > 1 {
+            for (i, el) in elements.iter().enumerate() {
+                let unique_id = format!("{}{}", base_id, i + 1);
+                id_updates.insert(el.span, unique_id.clone());
+                final_ids.insert(unique_id);
+            }
+        } else if let Some(el) = elements.first() {
+            if el.current_id.as_deref() != Some(&base_id) {
+                 id_updates.insert(el.span, base_id.clone());
+            }
+            final_ids.insert(base_id);
+        }
+    }
+    
+    (final_classnames, final_ids, id_updates)
 }
 
 fn parse_and_modify_file(
@@ -159,10 +190,7 @@ fn parse_and_modify_file(
         source.clone(),
     );
     let lexer = Lexer::new(
-        Syntax::Typescript(TsSyntax {
-            tsx: true,
-            ..Default::default()
-        }),
+        Syntax::Typescript(TsSyntax { tsx: true, ..Default::default() }),
         Default::default(),
         StringInput::from(&*fm),
         None,
@@ -173,16 +201,12 @@ fn parse_and_modify_file(
         Err(_) => return None,
     };
 
-    let mut local_classnames = HashSet::new();
-    let mut local_ids = HashSet::new();
-    let mut collector = ClassNameCollector {
-        classnames: &mut local_classnames,
-        ids: &mut local_ids,
-    };
-    module.visit_mut_with(&mut collector);
+    let (final_classnames, final_ids, id_updates) = determine_css_entities_and_updates(&module);
 
-    let mut id_adder = IdAdder;
-    module.visit_mut_with(&mut id_adder);
+    if !id_updates.is_empty() {
+        let mut applier = IdApplier { id_map: &id_updates };
+        module.visit_mut_with(&mut applier);
+    }
 
     let mut output = Vec::new();
     let mut emitter = Emitter {
@@ -194,8 +218,36 @@ fn parse_and_modify_file(
     emitter.emit_module(&module).ok()?;
     let modified_code = String::from_utf8(output).ok()?;
 
-    Some((local_classnames, local_ids, modified_code, source))
+    Some((final_classnames, final_ids, modified_code, source))
 }
+
+fn collect_css_entities(
+    path: &Path,
+    cm: &Arc<SourceMap>,
+) -> Option<(HashSet<String>, HashSet<String>)> {
+    let file = File::open(path).ok()?;
+    let mmap = unsafe { Mmap::map(&file).ok()? };
+    let source = String::from_utf8_lossy(&mmap);
+    let fm = cm.new_source_file(
+        Arc::new(FileName::Real(path.to_path_buf())),
+        source.into_owned(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsSyntax { tsx: true, ..Default::default() }),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let module = match parser.parse_module() {
+        Ok(module) => module,
+        Err(_) => return None,
+    };
+
+    let (classnames, ids, _) = determine_css_entities_and_updates(&module);
+    Some((classnames, ids))
+}
+
 
 fn write_file(path: &Path, content: &str) {
     let file = File::create(path).expect("Could not create file");
@@ -219,8 +271,6 @@ fn calculate_global_classnames_and_ids(
     (classnames, ids)
 }
 
-// NEW: Helper function to read existing classes and IDs from a CSS file.
-// This helps prevent rewriting the file if nothing has changed.
 fn read_existing_css(path: &Path) -> (HashSet<String>, HashSet<String>) {
     let mut classes = HashSet::new();
     let mut ids = HashSet::new();
@@ -234,7 +284,6 @@ fn read_existing_css(path: &Path) -> (HashSet<String>, HashSet<String>) {
         Err(_) => return (classes, ids),
     };
 
-    // This regex is simple but effective for the format this tool generates.
     let re = match Regex::new(r"^\s*[.#]([\w-]+)") {
         Ok(re) => re,
         Err(_) => return (classes, ids),
@@ -295,6 +344,9 @@ fn initial_scan() -> (
     );
     let start = Instant::now();
     let cm: Arc<SourceMap> = Default::default();
+    let output_path = PathBuf::from("./styles.css");
+
+    let (existing_classnames, existing_ids) = read_existing_css(&output_path);
 
     let current_dir = env::current_dir().expect("Failed to get current directory");
     let paths: Vec<_> = glob("./src/**/*.tsx")
@@ -303,13 +355,40 @@ fn initial_scan() -> (
         .map(|path| path.canonicalize().unwrap_or_else(|_| current_dir.join(path)))
         .collect();
 
+    let check_results: Vec<_> = paths
+        .par_iter()
+        .filter_map(|path| collect_css_entities(path, &cm))
+        .collect();
+
+    let mut expected_classnames = HashSet::new();
+    let mut expected_ids = HashSet::new();
+    for (classes, ids) in &check_results {
+        expected_classnames.extend(classes.clone());
+        expected_ids.extend(ids.clone());
+    }
+
+    if expected_classnames == existing_classnames && expected_ids == existing_ids {
+        println!(
+            "{} CSS is up-to-date. Skipping file modifications. \u{2022} {}",
+            "✓".bright_green(),
+            format_duration(start.elapsed()).bright_cyan()
+        );
+        let file_map: HashMap<_, _> = paths
+            .par_iter()
+            .filter_map(|path| {
+                collect_css_entities(path, &cm).map(|(classes, ids)| (path.clone(), (classes, ids)))
+            })
+            .collect();
+        return (file_map, existing_classnames, existing_ids);
+    }
+
+    println!("{}", "Changes detected, performing full scan and modification...".yellow());
     let file_map: HashMap<PathBuf, (HashSet<String>, HashSet<String>)> = paths
         .par_iter()
         .filter_map(|path| {
             if let Some((classnames, ids, modified_code, original_code)) =
                 parse_and_modify_file(path, &cm)
             {
-                // The optimized IdAdder reduces how often this is true.
                 if original_code != modified_code {
                     write_file(path, &modified_code);
                 }
@@ -321,15 +400,7 @@ fn initial_scan() -> (
         .collect();
 
     let (global_classnames, global_ids) = calculate_global_classnames_and_ids(&file_map);
-    let output_path = PathBuf::from("./styles.css");
-
-    // OPTIMIZATION: Check if the CSS file needs to be written at all.
-    // This compares the newly generated sets with what's already on disk.
-    let (existing_classnames, existing_ids) = read_existing_css(&output_path);
-    if global_classnames != existing_classnames || global_ids != existing_ids {
-        println!("{}", "CSS changes detected, regenerating styles.css...".yellow());
-        write_css(&global_classnames, &global_ids, &output_path);
-    }
+    write_css(&global_classnames, &global_ids, &output_path);
 
     let duration = start.elapsed();
     println!(
@@ -352,41 +423,48 @@ fn process_change(
     let start = Instant::now();
     let cm: Arc<SourceMap> = Default::default();
 
-    let (old_file_classnames, _) = file_map.get(path).cloned().unwrap_or_default();
+    let (old_file_classnames, old_file_ids) = file_map.get(path).cloned().unwrap_or_default();
 
-    let (new_file_classnames, new_file_ids, modified_code, original_code) = if path.exists() {
-        parse_and_modify_file(path, &cm).unwrap_or_default()
-    } else {
-        (HashSet::new(), HashSet::new(), String::new(), String::new())
-    };
-
-    // If the file exists but our optimized visitors made no changes, we can stop early.
-    if path.exists() && original_code == modified_code {
-        return None;
-    }
-
-    if path.exists() {
-        file_map.insert(
-            path.to_path_buf(),
-            (new_file_classnames.clone(), new_file_ids.clone()),
-        );
-    } else {
+    if !path.exists() {
         file_map.remove(path);
-    }
-
-    let (new_global_classnames, new_global_ids) = calculate_global_classnames_and_ids(file_map);
-
-    // If the global sets haven't changed, no need to write CSS.
-    if &new_global_classnames == old_global_classnames && &new_global_ids == old_global_ids {
-        // Still write the source file if it changed
-        if path.exists() && original_code != modified_code {
-            write_file(path, &modified_code);
+        let (new_global_classnames, new_global_ids) = calculate_global_classnames_and_ids(file_map);
+        if &new_global_classnames != old_global_classnames || &new_global_ids != old_global_ids {
+             write_css(&new_global_classnames, &new_global_ids, &PathBuf::from("./styles.css"));
         }
         return Some((new_global_classnames, new_global_ids));
     }
 
-    if path.exists() && original_code != modified_code {
+    let (new_file_classnames, new_file_ids, modified_code, original_code) =
+        if let Some(data) = parse_and_modify_file(path, &cm) {
+            data
+        } else {
+            return None;
+        };
+
+    let code_was_modified = original_code != modified_code;
+    let data_was_modified =
+        new_file_classnames != old_file_classnames || new_file_ids != old_file_ids;
+
+    if !code_was_modified && !data_was_modified {
+        return None;
+    }
+
+    file_map.insert(
+        path.to_path_buf(),
+        (new_file_classnames.clone(), new_file_ids.clone()),
+    );
+
+    if code_was_modified {
         write_file(path, &modified_code);
+    }
+
+    let (new_global_classnames, new_global_ids) = calculate_global_classnames_and_ids(file_map);
+    
+    let globals_did_change =
+        &new_global_classnames != old_global_classnames || &new_global_ids != old_global_ids;
+
+    if !globals_did_change {
+        return Some((new_global_classnames, new_global_ids));
     }
 
     let source_added = new_file_classnames.difference(&old_file_classnames).count();
@@ -395,9 +473,13 @@ fn process_change(
     let path_str = path.to_string_lossy().to_string();
     let display_name = path_str.bright_blue();
 
-    let output_added = new_global_classnames.difference(old_global_classnames).count()
+    let output_added = new_global_classnames
+        .difference(old_global_classnames)
+        .count()
         + new_global_ids.difference(old_global_ids).count();
-    let output_removed = old_global_classnames.difference(&new_global_classnames).count()
+    let output_removed = old_global_classnames
+        .difference(&new_global_classnames)
+        .count()
         + old_global_ids.difference(&new_global_ids).count();
 
     let output_path = PathBuf::from("./styles.css");
@@ -412,7 +494,7 @@ fn process_change(
 
     let duration = start.elapsed();
     println!(
-        "{} (+{},{}) -> {} (+{},{}) \u{2022} {}",
+        "{} (+{}, -{}) -> {} (+{}, -{}) \u{2022} {}",
         display_name,
         source_added.to_string().bright_green(),
         source_removed.to_string().bright_red(),
