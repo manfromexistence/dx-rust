@@ -2,7 +2,7 @@ use colored::*;
 use glob::glob;
 use memmap2::Mmap;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use rayon::prelude::*; // Import the Rayon prelude for parallel iterators
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -164,12 +164,10 @@ fn write_file(path: &Path, content: &str) {
 fn calculate_global_classnames_and_ids(
     file_map: &HashMap<PathBuf, (HashSet<String>, HashSet<String>)>,
 ) -> (HashSet<String>, HashSet<String>) {
-    // FIX: Use .par_iter() which is the correct method for parallel iteration on a HashMap.
     let classnames = file_map
         .par_iter()
         .flat_map(|(_, (classes, _))| classes.clone())
         .collect();
-    // FIX: Use .par_iter() here as well.
     let ids = file_map
         .par_iter()
         .flat_map(|(_, (_, ids))| ids.clone())
