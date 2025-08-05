@@ -4,30 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ahash = "0.8.12"
-bincode = "2.0.1"
-blake3 = "1.8.2"
-colored = "3.0.0"
-crossbeam = "0.8.4"
-glob = "0.3.2"
-lru = "0.16.0"
-memmap2 = "0.9.7"
-polling = "3.10.0"
-rayon = "1.10.0"
-redis = "0.32.4"
 rkyv = "0.8.11"
-rustlearn = "0.5.0"
-similar = "2.7.0"
-slab = "0.4.10"
-swc = "33.0.0"
-swc_common = "14.0.2"
+sysinfo = "0.30"
+tokio = { version = "1.47.1", features = ["full", "rt", "time"] }
+futures = "0.3"
+num_cpus = "1.16"
+bincode = "1.3"
+serde = { version = "1.0", features = ["derive"] }
 swc_ecma_ast = "14.0.0"
-swc_ecma_minifier = "28.0.2"
-swc_ecma_parser = "22.0.3"
 swc_ecma_visit = "14.0.0"
-sysinfo = "0.36.1"
-tokio = "1.47.1"
-zstd = "0.13.3"
+lru = "0.16"
+polling = "3.10"
+swc_common = "14.0.2"
+swc_ecma_parser = "14.0.0"
+glob = "0.3"
 # glob = "0.3.2"
 # swc = "33.0.0"
 # swc_common = "14.0.2"
@@ -63,11 +53,11 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 
-[[bin]]
-name = "dx-styles"
-path = "src/main.rs"
+# [[bin]]
+# name = "dx-styles"
+# path = "src/main.rs"
 
-[[bin]]
-name = "dx-styles-wasm"
-path = "src/wasm.rs"
-required-features = ["wasm"]
+# [[bin]]
+# name = "dx-styles-wasm"
+# path = "src/wasm.rs"
+# required-features = ["wasm"]
