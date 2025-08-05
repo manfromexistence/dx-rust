@@ -11,16 +11,16 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use swc_common::{FileName, SourceMap};
 use swc_ecma_ast::{JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, JSXAttr, IdentName, Str};
-use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
-use swc_ecma_visit::{Visit, VisitWith, VisitMut, VisitMutWith};
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsConfig};
+use swc_ecma_visit::{FoldWith, VisitMutWith, VisitMut};
 use swc_ecma_codegen::{Emitter, text_writer::JsWriter};
 
 struct ClassNameCollector<'a> {
     classnames: &'a mut HashSet<String>,
 }
 
-impl<'a> Visit for ClassNameCollector<'a> {
-    fn visit_jsx_opening_element(&mut self, elem: &JSXOpeningElement) {
+impl<'a> VisitMut for ClassNameCollector<'a> {
+    fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
         for attr in &elem.attrs {
             if let JSXAttrOrSpread::JSXAttr(attr) = attr {
                 if let JSXAttrName::Ident(ident) = &attr.name {
@@ -34,7 +34,6 @@ impl<'a> Visit for ClassNameCollector<'a> {
                 }
             }
         }
-        elem.visit_children_with(self);
     }
 }
 
@@ -85,8 +84,6 @@ impl VisitMut for IdAdder {
 
             elem.attrs.push(id_attr);
         }
-
-        elem.visit_mut_children_with(self);
     }
 }
 
@@ -95,11 +92,11 @@ fn parse_and_modify_file(path: &Path, cm: &Rc<SourceMap>) -> Option<(HashSet<Str
     let mmap = unsafe { Mmap::map(&file).ok()? };
     let source = String::from_utf8_lossy(&mmap).to_string();
     let fm = cm.new_source_file(
-        FileName::Real(path.to_path_buf()).into(),
+        FileName::Real(path.to_path_buf()),
         source.clone(),
     );
     let lexer = Lexer::new(
-        Syntax::Typescript(TsSyntax {
+        Syntax::Typescript(TsConfig {
             tsx: true,
             ..Default::default()
         }),
@@ -114,7 +111,7 @@ fn parse_and_modify_file(path: &Path, cm: &Rc<SourceMap>) -> Option<(HashSet<Str
     let mut collector = ClassNameCollector {
         classnames: &mut local_classnames,
     };
-    module.visit_with(&mut collector);
+    module.visit_mut_with(&mut collector);
 
     let mut id_adder = IdAdder;
     module.visit_mut_with(&mut id_adder);
