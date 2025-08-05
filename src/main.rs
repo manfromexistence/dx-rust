@@ -139,20 +139,21 @@ fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, Hash
     let mut id_updates = HashMap::new();
     let mut base_id_counts = HashMap::new();
     let mut elements_by_base_id: BTreeMap<String, Vec<ElementInfo>> = BTreeMap::new();
+    let group_class_name = "group".to_string();
 
     for el in &info_collector.elements {
         for cn in &el.class_names {
             final_classnames.insert(cn.clone());
         }
 
-        if el.class_names.is_empty() {
+        if !el.class_names.contains(&group_class_name) {
             if let Some(id) = &el.current_id {
                 final_ids.insert(id.clone());
             }
             continue;
         }
 
-        let mut id_chars: Vec<char> = el.class_names.iter().filter_map(|s| s.chars().next()).collect();
+        let mut id_chars: Vec<char> = el.class_names.iter().filter(|&cn| *cn != group_class_name).filter_map(|s| s.chars().next()).collect();
         id_chars.sort_unstable();
         id_chars.dedup();
         let expected_id: String = id_chars.into_iter().collect();
