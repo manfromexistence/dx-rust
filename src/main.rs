@@ -21,23 +21,6 @@ use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-fn is_managed_id(id: &str) -> bool {
-    let base_id: String = id.chars().filter(|c| c.is_alphabetic()).collect();
-    if base_id.is_empty() {
-        return false;
-    }
-    if base_id.chars().any(|c| !c.is_lowercase()) {
-        return false;
-    }
-    let mut chars: Vec<char> = base_id.chars().collect();
-    let original_len = chars.len();
-    chars.sort_unstable();
-    chars.dedup();
-    let sorted_unique_base_id: String = chars.into_iter().collect();
-    
-    base_id == sorted_unique_base_id && base_id.len() == original_len
-}
-
 #[derive(Debug, Clone)]
 struct ElementInfo {
     span: Span,
@@ -134,63 +117,78 @@ fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, Hash
     let mut info_collector = InfoCollector { elements: Vec::new() };
     info_collector.visit_module(&module);
 
-    let mut final_ids = HashSet::new();
     let mut final_classnames = HashSet::new();
+    let mut final_ids = HashSet::new();
     let mut id_updates = HashMap::new();
-    let mut base_id_counts = HashMap::new();
-    let mut elements_by_base_id: BTreeMap<String, Vec<ElementInfo>> = BTreeMap::new();
+    
     let group_class_name = "group".to_string();
 
-    for el in &info_collector.elements {
-        for cn in &el.class_names {
-            final_classnames.insert(cn.clone());
-        }
+    let mut managed_elements_with_base_id = Vec::new();
+
+    for el in info_collector.elements {
+        final_classnames.extend(el.class_names.iter().cloned());
 
         if !el.class_names.contains(&group_class_name) {
-            if let Some(id) = &el.current_id {
-                final_ids.insert(id.clone());
+            if let Some(id) = el.current_id {
+                final_ids.insert(id);
             }
-            continue;
-        }
-
-        let mut id_chars: Vec<char> = el.class_names.iter().filter(|&cn| *cn != group_class_name).filter_map(|s| s.chars().next()).collect();
-        id_chars.sort_unstable();
-        id_chars.dedup();
-        let expected_id: String = id_chars.into_iter().collect();
-
-        let should_manage_id = match &el.current_id {
-            Some(id) => is_managed_id(id),
-            None => true,
-        };
-
-        if should_manage_id {
-            elements_by_base_id.entry(expected_id.clone()).or_insert_with(Vec::new).push(el.clone());
-            *base_id_counts.entry(expected_id).or_insert(0) += 1;
-        } else if let Some(id) = &el.current_id {
-            final_ids.insert(id.clone());
+        } else {
+            let non_group_classes: Vec<_> = el.class_names.iter().filter(|&cn| *cn != group_class_name).cloned().collect();
+            let base_id = if non_group_classes.is_empty() {
+                "G".to_string()
+            } else {
+                let classes_to_sample = if non_group_classes.len() > 5 {
+                    vec![
+                        non_group_classes[0].clone(),
+                        non_group_classes[1].clone(),
+                        non_group_classes[non_group_classes.len() / 2].clone(),
+                        non_group_classes[non_group_classes.len() - 2].clone(),
+                        non_group_classes[non_group_classes.len() - 1].clone(),
+                    ]
+                } else {
+                    non_group_classes
+                };
+                
+                let mut id_chars: Vec<char> = classes_to_sample
+                    .iter()
+                    .filter_map(|s| s.chars().next())
+                    .map(|c| c.to_ascii_uppercase())
+                    .collect();
+                
+                id_chars.sort_unstable();
+                id_chars.dedup();
+                id_chars.into_iter().collect()
+            };
+            managed_elements_with_base_id.push((base_id, el));
         }
     }
 
+    let mut elements_by_base_id: BTreeMap<String, Vec<ElementInfo>> = BTreeMap::new();
+    for (base_id, el_info) in managed_elements_with_base_id {
+        elements_by_base_id.entry(base_id).or_insert_with(Vec::new).push(el_info);
+    }
+    
     for (base_id, elements) in elements_by_base_id {
-        let count = base_id_counts.get(&base_id).cloned().unwrap_or(0);
-        if count > 1 {
+        if elements.len() > 1 {
             for (i, el) in elements.iter().enumerate() {
-                let unique_id = format!("{}{}", base_id, i + 1);
-                if el.current_id.as_deref() != Some(&unique_id) {
-                    id_updates.insert(el.span, unique_id.clone());
+                let final_id = format!("{}{}", base_id, i + 1);
+                if el.current_id.as_deref() != Some(&final_id) {
+                    id_updates.insert(el.span, final_id.clone());
                 }
-                final_ids.insert(unique_id);
+                final_ids.insert(final_id);
             }
         } else if let Some(el) = elements.first() {
-            if el.current_id.as_deref() != Some(&base_id) {
-                 id_updates.insert(el.span, base_id.clone());
+            let final_id = base_id.clone();
+            if el.current_id.as_deref() != Some(&final_id) {
+                id_updates.insert(el.span, final_id.clone());
             }
-            final_ids.insert(base_id);
+            final_ids.insert(final_id);
         }
     }
     
     (final_classnames, final_ids, id_updates)
 }
+
 
 fn parse_and_modify_file(
     path: &Path,
