@@ -668,4 +668,44 @@ cargo add swc swc_common swc_ecma_ast swc_ecma_parser swc_ecma_visit swc_ecma_mi
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Good, now add  this game changing features:
+if the classnames has 
+```
+<div classname="{custom-class-component or if the () symbol is provided then we will generate our trusty 1,2,3 serializers here}(flex+border) other classnames">
+Element
+</div>``` 
+will result = 
+
+```
+let custom-class-component = "full big classnames";
+...
+<div classname="{custom-class-component or 1,2,3 serializers here}(FB+) other classes">
+Element
+</div>
+```
+Things to be noted here that if the user changes the variables then we will reflect it in our () correct and we will put a + sign so that it will be easier for users to write more grouped classnames faster and it will follow the similar logic of id generation of using serial numbers and so on!!!
+
 cargo add colored glob memmap2 notify rayon swc swc_common swc_ecma_ast swc_ecma_parser swc_ecma_visit swc_ecma_codegen
