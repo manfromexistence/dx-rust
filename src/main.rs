@@ -17,8 +17,10 @@ use swc_ecma_visit::{VisitMutWith};
 
 pub mod id;
 pub mod io;
+pub mod group;
 use id::{determine_css_entities_and_updates, IdApplier};
 use io::{read_existing_css, write_css, write_file};
+use group::GroupTransformer;
 
 fn parse_and_modify_file(
     path: &Path,
@@ -43,7 +45,11 @@ fn parse_and_modify_file(
         Err(_) => return None,
     };
 
-    let (final_classnames, final_ids, id_updates) = determine_css_entities_and_updates(&module);
+    let mut group_transformer = GroupTransformer::new();
+    module.visit_mut_with(&mut group_transformer);
+    let resolved_classes = group_transformer.resolved_classes;
+
+    let (final_classnames, final_ids, id_updates) = determine_css_entities_and_updates(&module, &resolved_classes);
 
     if !id_updates.is_empty() {
         let mut applier = IdApplier { id_map: &id_updates };
@@ -81,12 +87,16 @@ fn collect_css_entities(
         None,
     );
     let mut parser = Parser::new_from(lexer);
-    let module = match parser.parse_module() {
+    let mut module = match parser.parse_module() {
         Ok(module) => module,
         Err(_) => return None,
     };
 
-    let (classnames, ids, _) = determine_css_entities_and_updates(&module);
+    let mut group_transformer = GroupTransformer::new();
+    module.visit_mut_with(&mut group_transformer);
+    let resolved_classes = group_transformer.resolved_classes;
+
+    let (classnames, ids, _) = determine_css_entities_and_updates(&module, &resolved_classes);
     Some((classnames, ids))
 }
 

@@ -18,7 +18,7 @@ pub struct InfoCollector {
 
 impl Visit for InfoCollector {
     fn visit_jsx_opening_element(&mut self, elem: &JSXOpeningElement) {
-        let mut class_names = Vec::new();
+        let mut all_class_names = Vec::new();
         let mut current_id = None;
 
         for attr in &elem.attrs {
@@ -28,7 +28,7 @@ impl Visit for InfoCollector {
                         "className" => {
                             if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
                                 if !s.value.is_empty() {
-                                    class_names = s.value.split_whitespace().map(String::from).collect();
+                                    all_class_names.extend(s.value.split_whitespace().map(String::from));
                                 }
                             }
                         }
@@ -44,11 +44,14 @@ impl Visit for InfoCollector {
                 }
             }
         }
+        
+        all_class_names.sort();
+        all_class_names.dedup();
 
-        if !class_names.is_empty() || current_id.is_some() {
+        if !all_class_names.is_empty() || current_id.is_some() {
             self.elements.push(ElementInfo {
                 span: elem.span,
-                class_names,
+                class_names: all_class_names,
                 current_id,
             });
         }
@@ -97,7 +100,7 @@ impl<'a> VisitMut for IdApplier<'a> {
     }
 }
 
-pub fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, HashSet<String>, HashMap<Span, String>) {
+pub fn determine_css_entities_and_updates(module: &Module, resolved_classes: &HashMap<Span, Vec<String>>) -> (HashSet<String>, HashSet<String>, HashMap<Span, String>) {
     let mut info_collector = InfoCollector { elements: Vec::new() };
     info_collector.visit_module(&module);
 
@@ -105,32 +108,33 @@ pub fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, 
     let mut final_ids = HashSet::new();
     let mut id_updates = HashMap::new();
     
-    let group_class_name = "group".to_string();
+    let id_trigger_class = "id".to_string();
 
     let mut managed_elements_with_base_id = Vec::new();
 
     for el in info_collector.elements {
-        final_classnames.extend(el.class_names.iter().cloned());
+        let classes_for_id = resolved_classes.get(&el.span).unwrap_or(&el.class_names);
+        final_classnames.extend(classes_for_id.iter().cloned());
 
-        if !el.class_names.contains(&group_class_name) {
+        if !classes_for_id.contains(&id_trigger_class) {
             if let Some(id) = el.current_id {
                 final_ids.insert(id);
             }
         } else {
-            let non_group_classes: Vec<_> = el.class_names.iter().filter(|&cn| *cn != group_class_name).cloned().collect();
-            let base_id = if non_group_classes.is_empty() {
+            let non_trigger_classes: Vec<_> = classes_for_id.iter().filter(|&cn| *cn != id_trigger_class).cloned().collect();
+            let base_id = if non_trigger_classes.is_empty() {
                 "G".to_string()
             } else {
-                let classes_to_sample = if non_group_classes.len() > 5 {
+                let classes_to_sample = if non_trigger_classes.len() > 5 {
                     vec![
-                        non_group_classes[0].clone(),
-                        non_group_classes[1].clone(),
-                        non_group_classes[non_group_classes.len() / 2].clone(),
-                        non_group_classes[non_group_classes.len() - 2].clone(),
-                        non_group_classes[non_group_classes.len() - 1].clone(),
+                        non_trigger_classes[0].clone(),
+                        non_trigger_classes[1].clone(),
+                        non_trigger_classes[non_trigger_classes.len() / 2].clone(),
+                        non_trigger_classes[non_trigger_classes.len() - 2].clone(),
+                        non_trigger_classes[non_trigger_classes.len() - 1].clone(),
                     ]
                 } else {
-                    non_group_classes
+                    non_trigger_classes
                 };
                 
                 let mut id_chars: Vec<char> = classes_to_sample
