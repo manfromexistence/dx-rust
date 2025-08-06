@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use swc_common::{Span, FileName};
+use swc_common::{Span};
 use swc_ecma_ast::{
     IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, Str, Module,
 };
-use swc_ecma_visit::{Visit, VisitMut, VisitWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitWith, VisitMutWith};
 
 #[derive(Debug, Clone)]
 pub struct ElementInfo {

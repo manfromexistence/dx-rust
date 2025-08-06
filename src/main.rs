@@ -3,198 +3,28 @@ use glob::glob;
 use memmap2::Mmap;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rayon::prelude::*;
-use regex::Regex;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
-use swc_common::{Span, SourceMap, FileName};
-use swc_ecma_ast::{
-    IdentName, JSXAttr, JSXAttrName, JSXAttrOrSpread, JSXAttrValue, JSXOpeningElement, Lit, Str, Module,
-};
+use swc_common::{SourceMap, FileName};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
-use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+use swc_ecma_visit::{VisitMutWith};
 
-#[derive(Debug, Clone)]
-struct ElementInfo {
-    span: Span,
-    class_names: Vec<String>,
-    current_id: Option<String>,
-}
-
-struct InfoCollector {
-    elements: Vec<ElementInfo>,
-}
-
-impl Visit for InfoCollector {
-    fn visit_jsx_opening_element(&mut self, elem: &JSXOpeningElement) {
-        let mut class_names = Vec::new();
-        let mut current_id = None;
-
-        for attr in &elem.attrs {
-            if let JSXAttrOrSpread::JSXAttr(attr) = attr {
-                if let JSXAttrName::Ident(ident) = &attr.name {
-                    match ident.sym.as_ref() {
-                        "className" => {
-                            if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                                if !s.value.is_empty() {
-                                    class_names = s.value.split_whitespace().map(String::from).collect();
-                                }
-                            }
-                        }
-                        "id" => {
-                            if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                                if !s.value.is_empty() {
-                                    current_id = Some(s.value.to_string());
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        if !class_names.is_empty() || current_id.is_some() {
-            self.elements.push(ElementInfo {
-                span: elem.span,
-                class_names,
-                current_id,
-            });
-        }
-        
-        elem.visit_children_with(self);
-    }
-}
-
-struct IdApplier<'a> {
-    id_map: &'a HashMap<Span, String>,
-}
-
-impl<'a> VisitMut for IdApplier<'a> {
-    fn visit_mut_jsx_opening_element(&mut self, elem: &mut JSXOpeningElement) {
-        if let Some(new_id) = self.id_map.get(&elem.span) {
-            let mut has_id_attr = false;
-            for attr in &mut elem.attrs {
-                if let JSXAttrOrSpread::JSXAttr(jsx_attr) = attr {
-                    if let JSXAttrName::Ident(ident) = &jsx_attr.name {
-                        if ident.sym == "id" {
-                            jsx_attr.value = Some(JSXAttrValue::Lit(Lit::Str(Str {
-                                value: new_id.clone().into(),
-                                span: Default::default(),
-                                raw: None,
-                            })));
-                            has_id_attr = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if !has_id_attr {
-                elem.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                    name: JSXAttrName::Ident(IdentName::new("id".into(), Default::default())),
-                    value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                        value: new_id.clone().into(),
-                        span: Default::default(),
-                        raw: None,
-                    }))),
-                    span: Default::default(),
-                }));
-            }
-        }
-        elem.visit_mut_children_with(self);
-    }
-}
-
-fn determine_css_entities_and_updates(module: &Module) -> (HashSet<String>, HashSet<String>, HashMap<Span, String>) {
-    let mut info_collector = InfoCollector { elements: Vec::new() };
-    info_collector.visit_module(&module);
-
-    let mut final_classnames = HashSet::new();
-    let mut final_ids = HashSet::new();
-    let mut id_updates = HashMap::new();
-    
-    let group_class_name = "group".to_string();
-
-    let mut managed_elements_with_base_id = Vec::new();
-
-    for el in info_collector.elements {
-        final_classnames.extend(el.class_names.iter().cloned());
-
-        if !el.class_names.contains(&group_class_name) {
-            if let Some(id) = el.current_id {
-                final_ids.insert(id);
-            }
-        } else {
-            let non_group_classes: Vec<_> = el.class_names.iter().filter(|&cn| *cn != group_class_name).cloned().collect();
-            let base_id = if non_group_classes.is_empty() {
-                "G".to_string()
-            } else {
-                let classes_to_sample = if non_group_classes.len() > 5 {
-                    vec![
-                        non_group_classes[0].clone(),
-                        non_group_classes[1].clone(),
-                        non_group_classes[non_group_classes.len() / 2].clone(),
-                        non_group_classes[non_group_classes.len() - 2].clone(),
-                        non_group_classes[non_group_classes.len() - 1].clone(),
-                    ]
-                } else {
-                    non_group_classes
-                };
-                
-                let mut id_chars: Vec<char> = classes_to_sample
-                    .iter()
-                    .filter_map(|s| s.chars().next())
-                    .map(|c| c.to_ascii_uppercase())
-                    .collect();
-                
-                id_chars.sort_unstable();
-                id_chars.dedup();
-                id_chars.into_iter().collect()
-            };
-            managed_elements_with_base_id.push((base_id, el));
-        }
-    }
-
-    let mut elements_by_base_id: BTreeMap<String, Vec<ElementInfo>> = BTreeMap::new();
-    for (base_id, el_info) in managed_elements_with_base_id {
-        elements_by_base_id.entry(base_id).or_insert_with(Vec::new).push(el_info);
-    }
-    
-    for (base_id, elements) in elements_by_base_id {
-        if elements.len() > 1 {
-            for (i, el) in elements.iter().enumerate() {
-                let final_id = format!("{}{}", base_id, i + 1);
-                if el.current_id.as_deref() != Some(&final_id) {
-                    id_updates.insert(el.span, final_id.clone());
-                }
-                final_ids.insert(final_id);
-            }
-        } else if let Some(el) = elements.first() {
-            let final_id = base_id.clone();
-            if el.current_id.as_deref() != Some(&final_id) {
-                id_updates.insert(el.span, final_id.clone());
-            }
-            final_ids.insert(final_id);
-        }
-    }
-    
-    (final_classnames, final_ids, id_updates)
-}
-
+pub mod id;
+pub mod io;
+use id::{determine_css_entities_and_updates, IdApplier};
+use io::{read_existing_css, write_css, write_file};
 
 fn parse_and_modify_file(
     path: &Path,
     cm: &Arc<SourceMap>,
 ) -> Option<(HashSet<String>, HashSet<String>, String, String)> {
-    let file = File::open(path).ok()?;
+    let file = std::fs::File::open(path).ok()?;
     let mmap = unsafe { Mmap::map(&file).ok()? };
     let source = String::from_utf8_lossy(&mmap).to_string();
     let fm = cm.new_source_file(
@@ -237,7 +67,7 @@ fn collect_css_entities(
     path: &Path,
     cm: &Arc<SourceMap>,
 ) -> Option<(HashSet<String>, HashSet<String>)> {
-    let file = File::open(path).ok()?;
+    let file = std::fs::File::open(path).ok()?;
     let mmap = unsafe { Mmap::map(&file).ok()? };
     let source = String::from_utf8_lossy(&mmap);
     let fm = cm.new_source_file(
@@ -260,15 +90,6 @@ fn collect_css_entities(
     Some((classnames, ids))
 }
 
-
-fn write_file(path: &Path, content: &str) {
-    let file = File::create(path).expect("Could not create file");
-    let mut writer = BufWriter::new(file);
-    writer
-        .write_all(content.as_bytes())
-        .expect("Failed to write to file");
-}
-
 fn calculate_global_classnames_and_ids(
     file_map: &HashMap<PathBuf, (HashSet<String>, HashSet<String>)>,
 ) -> (HashSet<String>, HashSet<String>) {
@@ -281,59 +102,6 @@ fn calculate_global_classnames_and_ids(
         .flat_map(|(_, (_, ids))| ids.clone())
         .collect();
     (classnames, ids)
-}
-
-fn read_existing_css(path: &Path) -> (HashSet<String>, HashSet<String>) {
-    let mut classes = HashSet::new();
-    let mut ids = HashSet::new();
-
-    if !path.exists() {
-        return (classes, ids);
-    }
-
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return (classes, ids),
-    };
-
-    let re = match Regex::new(r"^\s*[.#]([\w-]+)") {
-        Ok(re) => re,
-        Err(_) => return (classes, ids),
-    };
-
-    for line in BufReader::new(file).lines() {
-        if let Ok(line_content) = line {
-            if let Some(caps) = re.captures(&line_content) {
-                if let Some(name_match) = caps.get(1) {
-                    let name = name_match.as_str().to_string();
-                    if line_content.trim().starts_with('.') {
-                        classes.insert(name);
-                    } else if line_content.trim().starts_with('#') {
-                        ids.insert(name);
-                    }
-                }
-            }
-        }
-    }
-
-    (classes, ids)
-}
-
-fn write_css(classnames: &HashSet<String>, ids: &HashSet<String>, output_path: &Path) {
-    let file = File::create(output_path).expect("Could not create styles.css for writing");
-    let mut writer = BufWriter::new(file);
-
-    let mut sorted_classnames: Vec<_> = classnames.iter().collect();
-    sorted_classnames.sort();
-    for classname in sorted_classnames {
-        writeln!(writer, ".{} {{}}", classname).expect("Failed to write to styles.css");
-    }
-
-    let mut sorted_ids: Vec<_> = ids.iter().collect();
-    sorted_ids.sort();
-    for id in sorted_ids {
-        writeln!(writer, "#{} {{}}", id).expect("Failed to write to styles.css");
-    }
 }
 
 fn format_duration(duration: Duration) -> String {
