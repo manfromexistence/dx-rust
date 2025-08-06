@@ -1,6 +1,6 @@
 use regex::{Captures, Regex};
 use std::collections::HashMap;
-use swc_common::{Span, SyntaxContext};
+use swc_common::{Span};
 use swc_ecma_ast::{
     Module, VarDecl, VarDeclarator, Pat, Lit, Expr, JSXAttr, JSXAttrName, JSXAttrValue,
     Ident, Stmt, Decl, ModuleItem,
